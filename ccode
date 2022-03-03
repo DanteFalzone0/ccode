@@ -1,0 +1,241 @@
+#!/usr/bin/python
+
+"""
+    ccode - a simple TUI text editor written in Python.
+    Copyright (C) 2022  Dante James Falzone
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
+import curses
+import sys
+
+
+class Cursor:
+    def __init__(self, row: int = 0, col: int = 0):
+        self.row = row
+        self._col = col
+        self._col_hint = col
+
+    @property
+    def col(self):
+        return self._col
+
+    @col.setter
+    def col(self, col):
+        self._col = col
+        self._col_hint = col
+
+    def _clamp_col(self, buffer):
+        self._col = min(self._col_hint, len(buffer[self.row]))
+
+    def up(self, buffer):
+        if self.row > 0:
+            self.row -= 1
+            self._clamp_col(buffer)
+
+    def down(self, buffer):
+        if self.row < len(buffer) - 1:
+            self.row += 1
+            self._clamp_col(buffer)
+
+    def left(self, buffer):
+        if self.col > 0:
+            self.col -= 1
+        else:
+            self.up(buffer)
+            self.col = len(buffer[self.row])
+
+    def right(self, buffer):
+        if self.col < len(buffer[self.row]):
+            self.col += 1
+        elif self.col == len(buffer[self.row]):
+            pass
+        else:
+            self.down(buffer)
+            self.col = 0
+
+
+class Window:
+    def __init__(self, buffer, title):
+        self.cursor = Cursor()
+        self.buffer = buffer
+        self.n_rows = curses.LINES - 2
+        self.n_cols = curses.COLS
+        self._title = title
+        self.help_str = "Ctrl+W to save, Ctrl+Q to exit"
+        padding = " " * (self.n_cols - len(self._title) - len(self.help_str))
+        self.header = [
+            f"{self._title}{padding}{self.help_str}",
+            "=" * self.n_cols
+        ]
+        self.row = 0
+        self.col = 0
+
+    @property
+    def bottom(self):
+        return self.row + self.n_rows - 1
+
+    @property
+    def title(self):
+        return self._title
+
+    @title.setter
+    def title(self, title):
+        self._title = title
+        padding = " " * (self.n_cols - len(self._title) - len(self.help_str))
+        self.header[0] = f"{self._title}{padding}{self.help_str}"
+
+    def cursor_up(self):
+        self.cursor.up(self.buffer)
+        if self.cursor.row == self.row - 1 and self.row > 0:
+            self.row -= 1
+
+    def cursor_down(self):
+        self.cursor.down(self.buffer)
+        if self.cursor.row == self.bottom + 1 and self.bottom < len(self.buffer) - 1:
+            self.row += 1
+
+    def cursor_left(self):
+        self.cursor.left(self.buffer)
+        if self.cursor.row == self.row - 1 and self.row > 0:
+            self.row -= 1
+
+    def cursor_right(self):
+        if self.cursor.col < self.n_cols - 1:
+            self.cursor.right(self.buffer)
+            if self.cursor.row == self.bottom + 1 and self.bottom < len(self.buffer) - 1:
+                self.row += 1
+
+    def translate(self):
+        return (self.cursor.row - self.row) + 2, self.cursor.col - self.col
+
+
+class Buffer:
+    def __init__(self, lines):
+        self.lines = lines
+        self.has_unsaved_changes = False
+
+    def __len__(self):
+        return len(self.lines)
+
+    def __getitem__(self, index):
+        if len(self) == 0:
+            return ""
+        else:
+            return self.lines[index]
+
+    def insert(self, window, string):
+        current = ""
+        if len(self) > 0:
+            current = self.lines.pop(window.cursor.row)
+        new = current[:window.cursor.col] + string + current[window.cursor.col:]
+        if len(new) < window.n_cols - 1:
+            self.has_unsaved_changes = True
+            self.lines.insert(window.cursor.row, new)
+            window.cursor_right()
+
+    def delete(self, window):
+        row, col = window.cursor.row, window.cursor.col
+        if row >= len(self):
+            row = len(self) - 1
+        if (row, col) < (len(self)-1, len(self[row])):
+            self.has_unsaved_changes = True
+            current = self.lines.pop(row)
+            if col < len(current):
+                new = current[:col] + current[col + 1:]
+                self.lines.insert(row, new)
+            else:
+                next = self.lines.pop(row)
+                new = current + next
+                self.lines.insert(row, new)
+
+    def split(self, window):
+        self.has_unsaved_changes = True
+        row, col = window.cursor.row, window.cursor.col
+        current = self.lines.pop(row)
+        self.lines.insert(row, current[:col])
+        self.lines.insert(row + 1, current[col:])
+
+
+def main(stdscr):
+    curses.raw()
+    buffer_str = None
+    if len(sys.argv) >= 2:
+        try:
+            buffer_str = open(sys.argv[1]).read()
+        except:
+            pass
+    else:
+        print("no file specified")
+        sys.exit(1)
+
+    buffer = None
+    if buffer_str is None:
+        buffer = [""]
+    else:
+        buffer = buffer_str.splitlines()
+    window = Window(Buffer(buffer), "Loading...")
+
+    def refresh():
+        stdscr.erase()
+        for i in range(len(window.header)):
+            stdscr.addstr(i, 0, window.header[i])
+        for row, line in enumerate(window.buffer[window.row:window.row + window.n_rows]):
+            stdscr.addstr(row+2, 0, line)
+        stdscr.move(*window.translate())
+
+    while True:
+        window.title = f"*{sys.argv[1]} - Unsaved changes" if window.buffer.has_unsaved_changes else sys.argv[1]
+        refresh()
+        k = stdscr.getch()
+        if k == 17: # ctrl+Q
+            return 0
+        elif k == 23: # ctrl+W
+            window.title = "Writing..."
+            refresh()
+            out = open(sys.argv[1], "w+")
+            if len(window.buffer) > 0:
+                out.write("\n".join(window.buffer))
+            else:
+                out.write("")
+            out.close()
+            window.buffer.has_unsaved_changes = False
+        elif k in (ord('\n'), ord('\r')):
+            window.buffer.split(window)
+            window.cursor_right()
+            window.cursor_down()
+        elif k == curses.KEY_UP:
+            window.cursor_up()
+        elif k == curses.KEY_DOWN:
+            window.cursor_down()
+        elif k == curses.KEY_LEFT:
+            window.cursor_left()
+        elif k == curses.KEY_RIGHT:
+            window.cursor_right()
+        elif k in (curses.KEY_DC, ord('\x04')):
+            window.buffer.delete(window)
+        elif k in (curses.KEY_BACKSPACE, ord('\x7f'), 8):
+            if (window.cursor.row, window.cursor.col) > (0, 0):
+                window.cursor_left()
+                window.buffer.delete(window)
+        # I wrote this comment in my own hand-written text editor!
+        elif k in range(32, 126) or k == ord('\t'): # printable ASCII characters
+            window.buffer.insert(window, chr(k))
+        else:
+            window.buffer.insert(window, str(k))
+
+
+if __name__ == "__main__":
+    curses.wrapper(main)
